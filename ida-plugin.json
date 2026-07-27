@@ -1,0 +1,7 @@
+{
+  "IDAMetadataDescriptorVersion": 1,
+  "plugin": {
+    "name": "IDAChef",
+    "entryPoint": "idachef_plugin.py"
+  }
+}
