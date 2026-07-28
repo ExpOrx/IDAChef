@@ -393,6 +393,39 @@ class ChefWidget(QtWidgets.QWidget):
         act_row.addWidget(btn_cmt)
         layout.addLayout(act_row)
 
+        # ---- Batch Processing Section ----
+        layout.addWidget(QtWidgets.QLabel("<b>Batch Processing — Address Range</b>"))
+        range_row = QtWidgets.QHBoxLayout()
+        range_row.addWidget(QtWidgets.QLabel("Start:"))
+        self.range_start_edit = QtWidgets.QLineEdit()
+        self.range_start_edit.setPlaceholderText("0x...")
+        range_row.addWidget(self.range_start_edit)
+        range_row.addWidget(QtWidgets.QLabel("End:"))
+        self.range_end_edit = QtWidgets.QLineEdit()
+        self.range_end_edit.setPlaceholderText("0x...")
+        range_row.addWidget(self.range_end_edit)
+        btn_read_range = QtWidgets.QPushButton("Read Strings in Range")
+        btn_read_range.clicked.connect(self._on_read_strings_in_range)
+        range_row.addWidget(btn_read_range)
+        layout.addLayout(range_row)
+
+        # Batch results table
+        self.batch_table = QtWidgets.QTableWidget(0, 4)
+        self.batch_table.setHorizontalHeaderLabels(["✓", "Address", "Original String", "Baked Result"])
+        self.batch_table.horizontalHeader().setStretchLastSection(True)
+        self.batch_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        layout.addWidget(self.batch_table)
+
+        # Batch action buttons
+        batch_btn_row = QtWidgets.QHBoxLayout()
+        btn_batch_bake = QtWidgets.QPushButton("Batch Bake")
+        btn_batch_bake.clicked.connect(self._on_batch_bake)
+        btn_batch_patch = QtWidgets.QPushButton("Batch Patch Selected")
+        btn_batch_patch.clicked.connect(self._on_batch_patch_selected)
+        batch_btn_row.addWidget(btn_batch_bake)
+        batch_btn_row.addWidget(btn_batch_patch)
+        layout.addLayout(batch_btn_row)
+
         self.status_label = QtWidgets.QLabel("")
         self.status_label.setStyleSheet("color: gray;")
         layout.addWidget(self.status_label)
@@ -716,6 +749,156 @@ class ChefWidget(QtWidgets.QWidget):
             self._set_status("Comment set at 0x%x" % ea)
         except Exception as exc:
             self._set_status("Comment failed: %s" % exc, error=True)
+
+    # -----------------------------------------------------------------------
+    # Batch processing — address range string scanning + bulk operations
+    # -----------------------------------------------------------------------
+    def _parse_addr(self, text):
+        """Parse a hex address string (with or without 0x prefix)."""
+        text = text.strip()
+        if not text:
+            raise ValueError("Address is empty")
+        if text.lower().startswith("0x"):
+            return int(text, 16)
+        return int(text, 16)
+
+    def _on_read_strings_in_range(self):
+        """Scan the [startAddress, endAddress) range for C-string literals
+        and populate the batch table with them."""
+        try:
+            start = self._parse_addr(self.range_start_edit.text())
+            end = self._parse_addr(self.range_end_edit.text())
+        except ValueError as exc:
+            self._set_status("Invalid address: %s" % exc, error=True)
+            return
+
+        if start >= end:
+            self._set_status("Start address must be less than end address", error=True)
+            return
+
+        self.batch_table.setRowCount(0)
+        count = 0
+        ea = start
+        while ea < end:
+            try:
+                s = ida_bytes.get_strlit_contents(ea, -1, ida_nalt.STRTYPE_C)
+            except Exception:
+                s = None
+
+            if s is not None and len(s) > 0:
+                # Check that the string actually starts at 'ea' (not an
+                # xref pointing into the middle of a string)
+                str_ea = ea
+                text = to_str(s)
+                row = self.batch_table.rowCount()
+                self.batch_table.insertRow(row)
+                # Checkbox column
+                chk_item = QtWidgets.QTableWidgetItem()
+                chk_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+                chk_item.setCheckState(Qt.Checked)
+                self.batch_table.setItem(row, 0, chk_item)
+                # Address column
+                addr_item = QtWidgets.QTableWidgetItem("0x%x" % str_ea)
+                addr_item.setFlags(addr_item.flags() & ~Qt.ItemIsEditable)
+                self.batch_table.setItem(row, 1, addr_item)
+                # Original string column
+                orig_item = QtWidgets.QTableWidgetItem(text)
+                orig_item.setToolTip(text)
+                orig_item.setFlags(orig_item.flags() & ~Qt.ItemIsEditable)
+                self.batch_table.setItem(row, 2, orig_item)
+                # Baked result column (empty initially)
+                result_item = QtWidgets.QTableWidgetItem("")
+                result_item.setFlags(result_item.flags() & ~Qt.ItemIsEditable)
+                self.batch_table.setItem(row, 3, result_item)
+                count += 1
+                # Advance past this string (including null terminator)
+                ea = str_ea + len(s) + 1
+            else:
+                ea += 1
+
+        self.batch_table.resizeColumnsToContents()
+        self._set_status("Found %d string(s) in range 0x%x – 0x%x" % (count, start, end))
+
+    def _on_batch_bake(self):
+        """Run the current recipe against every string in the batch table."""
+        if not self.recipe.steps:
+            self._set_status("Recipe is empty — add operations first", error=True)
+            return
+
+        row_count = self.batch_table.rowCount()
+        if row_count == 0:
+            self._set_status("No strings in batch table — read a range first", error=True)
+            return
+
+        processed = 0
+        errors = 0
+        for row in range(row_count):
+            orig_item = self.batch_table.item(row, 2)
+            if orig_item is None:
+                continue
+            orig_text = orig_item.text()
+            input_bytes = to_bytes(orig_text)
+            result = self.recipe.bake(input_bytes)
+            if result.error:
+                result_text = "ERROR: %s" % result.error
+                errors += 1
+            else:
+                result_text = to_str(result.output)
+            result_item = self.batch_table.item(row, 3)
+            if result_item is None:
+                result_item = QtWidgets.QTableWidgetItem(result_text)
+                result_item.setFlags(result_item.flags() & ~Qt.ItemIsEditable)
+                self.batch_table.setItem(row, 3, result_item)
+            else:
+                result_item.setText(result_text)
+            processed += 1
+
+        self.batch_table.resizeColumnsToContents()
+        self._set_status("Batch baked %d string(s), %d error(s)" % (processed, errors))
+
+    def _on_batch_patch_selected(self):
+        """Patch checked rows: write the baked result bytes back to each
+        checked address.  Unchecked rows are skipped."""
+        row_count = self.batch_table.rowCount()
+        if row_count == 0:
+            self._set_status("No strings in batch table", error=True)
+            return
+
+        patched = 0
+        skipped = 0
+        for row in range(row_count):
+            chk_item = self.batch_table.item(row, 0)
+            if chk_item is None or chk_item.checkState() != Qt.Checked:
+                skipped += 1
+                continue
+
+            addr_text = self.batch_table.item(row, 1).text() if self.batch_table.item(row, 1) else ""
+            result_text = self.batch_table.item(row, 3).text() if self.batch_table.item(row, 3) else ""
+
+            if not addr_text or not result_text:
+                skipped += 1
+                continue
+
+            try:
+                ea = self._parse_addr(addr_text)
+            except ValueError:
+                skipped += 1
+                continue
+
+            data = to_bytes(result_text)
+            if not data:
+                skipped += 1
+                continue
+
+            try:
+                # Patch: write result bytes and a null terminator if the
+                # original string was null-terminated
+                ida_bytes.patch_bytes(ea, data + b"\x00")
+                patched += 1
+            except Exception as exc:
+                log.error("Batch patch failed at %s: %s", addr_text, exc)
+
+        self._set_status("Patched %d string(s), skipped %d" % (patched, skipped))
 
 
 class ChefForm(idaapi.PluginForm):
