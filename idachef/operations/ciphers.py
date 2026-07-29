@@ -24,19 +24,42 @@ except Exception:  # pragma: no cover - optional dependency
 class XOR(Operation):
     name = "XOR"
     category = CATEGORY
-    description = "XORs the input with the given key, repeating the key as necessary."
+    description = (
+        "XORs the input with the given key, repeating the key as necessary. "
+        "Set 'Unit' to UTF-16LE (word) for wide-string obfuscation, where the "
+        "key is XORed against each 16-bit code unit instead of each raw byte "
+        "-- e.g. 0x74 0x00 XOR key 3 gives 0x77 0x00 (matches the common "
+        "WCHAR-loop XOR scheme), not 0x77 0x03 as a plain byte-wise XOR would."
+    )
     args = [
         {"name": "Key", "type": "string", "value": ""},
         {"name": "Key format", "type": "option", "value": "Hex", "options": ["Hex", "UTF8", "Base64"]},
+        {"name": "Unit", "type": "option", "value": "Byte", "options": ["Byte", "UTF-16LE (word)"]},
     ]
 
     def _run(self, data, args):
         key_str = self.get_arg(args, "Key", "")
         key_fmt = self.get_arg(args, "Key format", "Hex")
+        unit = self.get_arg(args, "Unit", "Byte")
         key = key_bytes(key_str, key_fmt)
         if not key:
             return data
+        if unit == "UTF-16LE (word)":
+            return self._xor_utf16le(data, key)
         return bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
+
+    @staticmethod
+    def _xor_utf16le(data, key):
+        """XOR data as a stream of little-endian 16-bit code units. Any
+        trailing odd byte is padded with 0x00 for the XOR then trimmed
+        back off so the output length always matches the input length."""
+        padded = data + (b"\x00" if len(data) % 2 else b"")
+        data_units = struct.unpack("<%dH" % (len(padded) // 2), padded)
+        key_padded = key + (b"\x00" if len(key) % 2 else b"")
+        key_units = struct.unpack("<%dH" % (len(key_padded) // 2), key_padded)
+        out_units = [u ^ key_units[i % len(key_units)] for i, u in enumerate(data_units)]
+        out = struct.pack("<%dH" % len(out_units), *out_units)
+        return out[:len(data)]
 
 
 class XORBruteForce(Operation):
