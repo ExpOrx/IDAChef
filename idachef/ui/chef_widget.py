@@ -762,9 +762,60 @@ class ChefWidget(QtWidgets.QWidget):
             return int(text, 16)
         return int(text, 16)
 
+    # Custom Qt data role for storing raw bytes (avoids NUL-byte loss
+    # through the text round-trip, which is critical for UTF-16LE strings).
+    _RAW_BYTES_ROLE = Qt.UserRole + 2
+
+    @staticmethod
+    def _read_utf16le_at(ea, min_len=3):
+        """Read a UTF-16LE null-terminated string starting at *ea*.
+        Returns (raw_bytes, length_including_terminator) or (None, 0)
+        if the bytes at *ea* don't look like valid UTF-16LE text.
+        """
+        # Read a probe chunk
+        raw = ida_bytes.get_bytes(ea, 512)
+        if raw is None or len(raw) < 2:
+            return None, 0
+
+        # Fast reject: first two bytes must have byte[1] == 0x00
+        if len(raw) < 2 or raw[1] != 0x00:
+            return None, 0
+
+        end_pos = -1
+        for i in range(0, len(raw) - 1, 2):
+            lo, hi = raw[i], raw[i + 1]
+            if lo == 0x00 and hi == 0x00:
+                end_pos = i  # position of the NUL terminator (first byte of the pair)
+                break
+            # Reject if hi byte is non-zero (invalid UTF-16LE BMP char)
+            if hi != 0x00:
+                return None, 0
+
+        if end_pos < 0:
+            return None, 0  # no null terminator found
+
+        # Must have at least min_len valid characters
+        char_count = end_pos // 2
+        if char_count < min_len:
+            return None, 0
+
+        # Check that most bytes are printable ASCII (range 0x20-0x7E)
+        str_bytes = raw[:end_pos]
+        printable = sum(1 for i in range(0, len(str_bytes), 2) if 0x20 <= str_bytes[i] <= 0x7E)
+        if printable < char_count * 0.7:
+            return None, 0
+
+        # Include the 2-byte null terminator in total length for advancing
+        total_len = end_pos + 2
+        return raw[:end_pos], total_len
+
     def _on_read_strings_in_range(self):
         """Scan the [startAddress, endAddress) range for C-string literals
-        and populate the batch table with them."""
+        (both UTF-16LE and ASCII) and populate the batch table with them.
+
+        UTF-16LE detection is done in Python by inspecting raw bytes, because
+        IDA's get_strlit_contents(STARTYPE_C_16) only works on strings that
+        IDA has already tagged in the database."""
         try:
             start = self._parse_addr(self.range_start_edit.text())
             end = self._parse_addr(self.range_end_edit.text())
@@ -780,16 +831,40 @@ class ChefWidget(QtWidgets.QWidget):
         count = 0
         ea = start
         while ea < end:
-            try:
-                s = ida_bytes.get_strlit_contents(ea, -1, ida_nalt.STRTYPE_C)
-            except Exception:
-                s = None
+            s = None
+            strtype_label = ""
+            advance_by = 0
+
+            # Step 1: try UTF-16LE via Python-side detection (more reliable
+            # than IDA's STRTYPE_C_16 which depends on DB metadata)
+            utf16_raw, utf16_advance = self._read_utf16le_at(ea)
+            if utf16_raw is not None:
+                s = utf16_raw
+                strtype_label = "UTF-16LE"
+                advance_by = utf16_advance
+
+            # Step 2: fallback to IDA ASCII C-string detection
+            if s is None:
+                try:
+                    s = ida_bytes.get_strlit_contents(ea, -1, ida_nalt.STRTYPE_C)
+                except Exception:
+                    s = None
+                if s is not None and len(s) > 0:
+                    strtype_label = "ASCII"
+                    advance_by = len(s) + 1  # +1 for null terminator
 
             if s is not None and len(s) > 0:
-                # Check that the string actually starts at 'ea' (not an
-                # xref pointing into the middle of a string)
                 str_ea = ea
-                text = to_str(s)
+                raw_bytes = bytes(s)
+                # Display: for UTF-16LE show decoded text; for ASCII use to_str
+                if strtype_label == "UTF-16LE":
+                    try:
+                        display_text = raw_bytes.decode("utf-16-le", errors="replace")
+                    except Exception:
+                        display_text = to_str(raw_bytes)
+                else:
+                    display_text = to_str(raw_bytes)
+
                 row = self.batch_table.rowCount()
                 self.batch_table.insertRow(row)
                 # Checkbox column
@@ -797,22 +872,24 @@ class ChefWidget(QtWidgets.QWidget):
                 chk_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
                 chk_item.setCheckState(Qt.Checked)
                 self.batch_table.setItem(row, 0, chk_item)
-                # Address column
-                addr_item = QtWidgets.QTableWidgetItem("0x%x" % str_ea)
+                # Address column (tagged with string type)
+                addr_item = QtWidgets.QTableWidgetItem("0x%x [%s]" % (str_ea, strtype_label))
                 addr_item.setFlags(addr_item.flags() & ~Qt.ItemIsEditable)
                 self.batch_table.setItem(row, 1, addr_item)
-                # Original string column
-                orig_item = QtWidgets.QTableWidgetItem(text)
-                orig_item.setToolTip(text)
+                # Original string column (display text)
+                orig_item = QtWidgets.QTableWidgetItem(display_text)
+                orig_item.setToolTip(display_text)
                 orig_item.setFlags(orig_item.flags() & ~Qt.ItemIsEditable)
+                # Store raw bytes in a custom data role so batch bake can
+                # use them directly without NUL-byte loss through text round-trip
+                orig_item.setData(self._RAW_BYTES_ROLE, raw_bytes)
                 self.batch_table.setItem(row, 2, orig_item)
                 # Baked result column (empty initially)
                 result_item = QtWidgets.QTableWidgetItem("")
                 result_item.setFlags(result_item.flags() & ~Qt.ItemIsEditable)
                 self.batch_table.setItem(row, 3, result_item)
                 count += 1
-                # Advance past this string (including null terminator)
-                ea = str_ea + len(s) + 1
+                ea = str_ea + advance_by
             else:
                 ea += 1
 
@@ -820,7 +897,12 @@ class ChefWidget(QtWidgets.QWidget):
         self._set_status("Found %d string(s) in range 0x%x – 0x%x" % (count, start, end))
 
     def _on_batch_bake(self):
-        """Run the current recipe against every string in the batch table."""
+        """Run the current recipe against every string in the batch table.
+
+        Uses raw bytes stored in _RAW_BYTES_ROLE by _on_read_strings_in_range
+        to avoid NUL-byte loss from the text round-trip (critical for
+        UTF-16LE strings).  Falls back to to_bytes(text()) for rows read
+        by older code or manually populated."""
         if not self.recipe.steps:
             self._set_status("Recipe is empty — add operations first", error=True)
             return
@@ -836,8 +918,12 @@ class ChefWidget(QtWidgets.QWidget):
             orig_item = self.batch_table.item(row, 2)
             if orig_item is None:
                 continue
-            orig_text = orig_item.text()
-            input_bytes = to_bytes(orig_text)
+            # Prefer raw bytes stored via _RAW_BYTES_ROLE; fallback to text
+            raw = orig_item.data(self._RAW_BYTES_ROLE)
+            if raw is not None:
+                input_bytes = bytes(raw)
+            else:
+                input_bytes = to_bytes(orig_item.text())
             result = self.recipe.bake(input_bytes)
             if result.error:
                 result_text = "ERROR: %s" % result.error
@@ -879,8 +965,15 @@ class ChefWidget(QtWidgets.QWidget):
                 skipped += 1
                 continue
 
+            # Strip the string type suffix (e.g. "[UTF-16LE]") added by
+            # _on_read_strings_in_range
+            addr_clean = re.sub(r"\s*\[.*\]\s*", "", addr_text).strip()
+
+            # Detect UTF-16LE mode from the address label
+            is_utf16 = "[UTF-16LE]" in addr_text
+
             try:
-                ea = self._parse_addr(addr_text)
+                ea = self._parse_addr(addr_clean)
             except ValueError:
                 skipped += 1
                 continue
@@ -891,9 +984,10 @@ class ChefWidget(QtWidgets.QWidget):
                 continue
 
             try:
-                # Patch: write result bytes and a null terminator if the
-                # original string was null-terminated
-                ida_bytes.patch_bytes(ea, data + b"\x00")
+                # Patch: write result bytes and a null terminator.
+                # Use 2-byte terminator for UTF-16LE strings.
+                terminator = b"\x00\x00" if is_utf16 else b"\x00"
+                ida_bytes.patch_bytes(ea, data + terminator)
                 patched += 1
             except Exception as exc:
                 log.error("Batch patch failed at %s: %s", addr_text, exc)

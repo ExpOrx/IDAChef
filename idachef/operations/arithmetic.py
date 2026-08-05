@@ -9,6 +9,7 @@ config blobs or applying an additive/XOR key-schedule byte-wise."""
 
 import math
 import re
+import struct
 import statistics as stats_mod
 
 from ..core.operation import Operation
@@ -16,6 +17,24 @@ from ..core.formula import parse_formula, apply_formula
 from ..core.utils import key_bytes, parse_numbers, fmt_num, bytewise_op, text_from_data_ignore
 
 CATEGORY = "Arithmetic / Logic"
+
+
+def _wordwise_op(data, key, fn):
+    """Apply fn(u, k) & 0xFFFF to data as a stream of little-endian
+    16-bit code units, cycling the key (also unpacked as LE 16-bit units).
+    Any trailing odd byte is padded with 0x00 for the operation then
+    trimmed back off so the output length always matches the input length.
+    """
+    padded = data + (b"\x00" if len(data) % 2 else b"")
+    data_units = struct.unpack("<%dH" % (len(padded) // 2), padded)
+    key_padded = key + (b"\x00" if len(key) % 2 else b"")
+    key_units = struct.unpack("<%dH" % (len(key_padded) // 2), key_padded)
+    out_units = [
+        fn(u, key_units[i % len(key_units)]) & 0xFFFF
+        for i, u in enumerate(data_units)
+    ]
+    out = struct.pack("<%dH" % len(out_units), *out_units)
+    return out[:len(data)]
 
 
 class Sum(Operation):
@@ -149,28 +168,48 @@ class ModularInverse(Operation):
 class BitwiseAND(Operation):
     name = "AND"
     category = CATEGORY
-    description = "ANDs the input with the given key byte-wise, repeating the key as necessary."
+    description = (
+        "ANDs the input with the given key, repeating the key as necessary. "
+        "Set 'Unit' to UTF-16LE (word) for wide-string operations, where the "
+        "key is ANDed against each 16-bit code unit instead of each raw byte."
+    )
     args = [
         {"name": "Key", "type": "string", "value": "ff"},
         {"name": "Key format", "type": "option", "value": "Hex", "options": ["Hex", "UTF8", "Base64"]},
+        {"name": "Unit", "type": "option", "value": "Byte", "options": ["Byte", "UTF-16LE (word)"]},
     ]
 
     def _run(self, data, args):
         key = key_bytes(self.get_arg(args, "Key", "ff"), self.get_arg(args, "Key format", "Hex"))
+        unit = self.get_arg(args, "Unit", "Byte")
+        if not key:
+            return data
+        if unit == "UTF-16LE (word)":
+            return _wordwise_op(data, key, lambda a, b: a & b)
         return bytewise_op(data, key, lambda a, b: a & b)
 
 
 class BitwiseOR(Operation):
     name = "OR"
     category = CATEGORY
-    description = "ORs the input with the given key byte-wise, repeating the key as necessary."
+    description = (
+        "ORs the input with the given key, repeating the key as necessary. "
+        "Set 'Unit' to UTF-16LE (word) for wide-string operations, where the "
+        "key is ORed against each 16-bit code unit instead of each raw byte."
+    )
     args = [
         {"name": "Key", "type": "string", "value": "00"},
         {"name": "Key format", "type": "option", "value": "Hex", "options": ["Hex", "UTF8", "Base64"]},
+        {"name": "Unit", "type": "option", "value": "Byte", "options": ["Byte", "UTF-16LE (word)"]},
     ]
 
     def _run(self, data, args):
         key = key_bytes(self.get_arg(args, "Key", "00"), self.get_arg(args, "Key format", "Hex"))
+        unit = self.get_arg(args, "Unit", "Byte")
+        if not key:
+            return data
+        if unit == "UTF-16LE (word)":
+            return _wordwise_op(data, key, lambda a, b: a | b)
         return bytewise_op(data, key, lambda a, b: a | b)
 
 
@@ -186,28 +225,50 @@ class BitwiseNOT(Operation):
 class AddMod256(Operation):
     name = "ADD"
     category = CATEGORY
-    description = "Adds the given key to the input byte-wise (mod 256), repeating the key as necessary. Inverse of SUB."
+    description = (
+        "Adds the given key to the input, repeating the key as necessary. "
+        "Set 'Unit' to Byte for byte-wise (mod 256) or UTF-16LE (word) for "
+        "wide-string operations where the key is added to each 16-bit code "
+        "unit (mod 65536). Inverse of SUB."
+    )
     args = [
         {"name": "Key", "type": "string", "value": "01"},
         {"name": "Key format", "type": "option", "value": "Hex", "options": ["Hex", "UTF8", "Base64"]},
+        {"name": "Unit", "type": "option", "value": "Byte", "options": ["Byte", "UTF-16LE (word)"]},
     ]
 
     def _run(self, data, args):
         key = key_bytes(self.get_arg(args, "Key", "01"), self.get_arg(args, "Key format", "Hex"))
+        unit = self.get_arg(args, "Unit", "Byte")
+        if not key:
+            return data
+        if unit == "UTF-16LE (word)":
+            return _wordwise_op(data, key, lambda a, b: a + b)
         return bytewise_op(data, key, lambda a, b: a + b)
 
 
 class SubMod256(Operation):
     name = "SUB"
     category = CATEGORY
-    description = "Subtracts the given key from the input byte-wise (mod 256), repeating the key as necessary. Inverse of ADD."
+    description = (
+        "Subtracts the given key from the input, repeating the key as necessary. "
+        "Set 'Unit' to Byte for byte-wise (mod 256) or UTF-16LE (word) for "
+        "wide-string operations where the key is subtracted from each 16-bit "
+        "code unit (mod 65536). Inverse of ADD."
+    )
     args = [
         {"name": "Key", "type": "string", "value": "01"},
         {"name": "Key format", "type": "option", "value": "Hex", "options": ["Hex", "UTF8", "Base64"]},
+        {"name": "Unit", "type": "option", "value": "Byte", "options": ["Byte", "UTF-16LE (word)"]},
     ]
 
     def _run(self, data, args):
         key = key_bytes(self.get_arg(args, "Key", "01"), self.get_arg(args, "Key format", "Hex"))
+        unit = self.get_arg(args, "Unit", "Byte")
+        if not key:
+            return data
+        if unit == "UTF-16LE (word)":
+            return _wordwise_op(data, key, lambda a, b: a - b)
         return bytewise_op(data, key, lambda a, b: a - b)
 
 
