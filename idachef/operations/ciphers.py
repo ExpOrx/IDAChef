@@ -14,7 +14,7 @@ from ..core.utils import key_bytes
 CATEGORY = "Encryption / Encoding"
 
 try:
-    from Crypto.Cipher import AES, DES, DES3, ARC4, Blowfish, ChaCha20, ARC2
+    from Crypto.Cipher import AES, DES, DES3, ARC4, Blowfish, ChaCha20, ARC2, Salsa20
     from Crypto.Util.Padding import pad, unpad
     HAVE_PYCRYPTODOME = True
 except Exception:  # pragma: no cover - optional dependency
@@ -194,10 +194,29 @@ class ROT8000(Operation):
 class ROR13(Operation):
     name = "ROR13"
     category = CATEGORY
-    description = "Shifts each byte right by 13 bits (rotate right 13, same as rotate left 3)."
+    description = "Rotates each byte right by 13 bits. On an 8-bit byte that is equivalent to rotate-right-5 / rotate-left-3 (13 mod 8 = 5). Note: the classic ROR13 hash of the malware world operates on 32-bit words - use 'ROR13 Hash' for that."
+    args = [{"name": "Mode", "type": "option", "value": "Rotate (byte)",
+             "options": ["Rotate (byte)", "ROR13 hash (32-bit, lowercase)", "ROR13 hash (32-bit, uppercase)"]}]
 
     def _run(self, data, args):
-        return bytes(((b >> 3) | ((b << 5) & 0xFF)) for b in data)
+        mode = self.get_arg(args, "Mode", "Rotate (byte)")
+        if mode.startswith("ROR13 hash"):
+            text = data.decode("utf-8", errors="ignore")
+            if mode.endswith("uppercase"):
+                text = text.upper()
+            h = _ror13_hash(text)
+            return ("0x%08x" % h).encode()
+        # ROR 13 bits on an 8-bit byte == ROR 5 (13 mod 8)
+        return bytes((b >> 5) | ((b << 3) & 0xFF) for b in data)
+
+
+def _ror13_hash(text, seed=0):
+    """Classic 32-bit ROR13 string hash (as used to resolve Win32 API names)."""
+    h = seed & 0xFFFFFFFF
+    for ch in text.encode("utf-8"):
+        h = (((h >> 13) | (h << 19)) & 0xFFFFFFFF)
+        h = (h + ch) & 0xFFFFFFFF
+    return h
 
 
 class Atbash(Operation):
@@ -374,7 +393,12 @@ class AESEncrypt(Operation):
             cipher = AES.new(key, mode, iv=iv[:16].ljust(16, b"\x00"))
             return cipher.encrypt(pad(data, AES.block_size))
         if mode_name == "CTR":
-            cipher = AES.new(key, mode, nonce=iv[:8].ljust(8, b"\x00"))
+            # A full 16-byte IV is used as the initial counter value
+            # (OpenSSL / CyberChef style); a shorter IV is the CTR nonce.
+            if len(iv) >= 16:
+                cipher = AES.new(key, mode, nonce=b"", initial_value=iv[:16])
+            else:
+                cipher = AES.new(key, mode, nonce=iv[:8].ljust(8, b"\x00"))
             return cipher.encrypt(data)
         cipher = AES.new(key, mode, nonce=iv[:12].ljust(12, b"\x00"))
         ct, tag = cipher.encrypt_and_digest(data)
@@ -406,7 +430,10 @@ class AESDecrypt(Operation):
             cipher = AES.new(key, AES.MODE_CBC, iv=iv[:16].ljust(16, b"\x00"))
             return unpad(cipher.decrypt(data), AES.block_size)
         if mode_name == "CTR":
-            cipher = AES.new(key, AES.MODE_CTR, nonce=iv[:8].ljust(8, b"\x00"))
+            if len(iv) >= 16:
+                cipher = AES.new(key, AES.MODE_CTR, nonce=b"", initial_value=iv[:16])
+            else:
+                cipher = AES.new(key, AES.MODE_CTR, nonce=iv[:8].ljust(8, b"\x00"))
             return cipher.decrypt(data)
         cipher = AES.new(key, AES.MODE_GCM, nonce=iv[:12].ljust(12, b"\x00"))
         ct, tag = data[:-16], data[-16:]
@@ -693,7 +720,42 @@ class ChaCha20Op(Operation):
         return cipher.encrypt(data)
 
 
+class Salsa20Op(Operation):
+    name = "Salsa20"
+    category = CATEGORY
+    description = "Encrypts/decrypts using the Salsa20 stream cipher (symmetric). Requires pycryptodome."
+    args = [
+        {"name": "Key", "type": "string", "value": ""},
+        {"name": "Key format", "type": "option", "value": "Hex", "options": ["Hex", "UTF8", "Base64"]},
+        {"name": "Nonce", "type": "string", "value": ""},
+        {"name": "Nonce format", "type": "option", "value": "Hex", "options": ["Hex", "UTF8", "Base64"]},
+    ]
+
+    def _run(self, data, args):
+        if not HAVE_PYCRYPTODOME:
+            raise ImportError("pycryptodome is not installed - run: pip install pycryptodome")
+        key = key_bytes(self.get_arg(args, "Key", ""), self.get_arg(args, "Key format", "Hex"))
+        nonce = key_bytes(self.get_arg(args, "Nonce", ""), self.get_arg(args, "Nonce format", "Hex"))
+        cipher = Salsa20.new(key=key, nonce=nonce[:8].ljust(8, b"\x00"))
+        return cipher.encrypt(data)
+
+
 # ---- TEA ----
+def _tea_pad(data, block):
+    """PKCS-style padding for TEA-family ciphers: always add 1..block bytes
+    so the amount of padding can be recovered unambiguously on decrypt."""
+    pad_len = block - (len(data) % block)
+    return data + bytes([pad_len] * pad_len)
+
+
+def _tea_unpad(result, block):
+    if result:
+        pad_len = result[-1]
+        if 1 <= pad_len <= block and all(b == pad_len for b in result[-pad_len:]):
+            return result[:-pad_len]
+    return result
+
+
 class TEAEncrypt(Operation):
     name = "TEA Encrypt"
     category = CATEGORY
@@ -710,9 +772,7 @@ class TEAEncrypt(Operation):
         rounds = int(self.get_arg(args, "Rounds", 32))
         delta = 0x9E3779B9
         K = struct.unpack(">4I", key)
-        # Pad to 8 bytes
-        pad_len = (8 - (len(data) % 8)) % 8
-        data = data + bytes([pad_len] * pad_len)
+        data = _tea_pad(data, 8)
         blocks = [struct.unpack(">2I", data[i:i + 8]) for i in range(0, len(data), 8)]
         out = bytearray()
         for v0, v1 in blocks:
@@ -750,14 +810,7 @@ class TEADecrypt(Operation):
                 v0 = (v0 - (((v1 << 4) + K[0]) ^ (v1 + _sum) ^ ((v1 >> 5) + K[1]))) & 0xFFFFFFFF
                 _sum = (_sum - delta) & 0xFFFFFFFF
             out.extend(struct.pack(">2I", v0, v1))
-        result = bytes(out)
-        # Remove PKCS-style padding (last byte = pad length)
-        if result:
-            pad_len = result[-1]
-            if 1 <= pad_len <= 8:
-                if all(b == pad_len for b in result[-pad_len:]):
-                    result = result[:-pad_len]
-        return result
+        return _tea_unpad(bytes(out), 8)
 
 
 # ---- XTEA ----
@@ -777,8 +830,7 @@ class XTEAEncrypt(Operation):
         rounds = int(self.get_arg(args, "Rounds", 32))
         delta = 0x9E3779B9
         K = struct.unpack(">4I", key)
-        pad_len = (8 - (len(data) % 8)) % 8
-        data = data + bytes([pad_len] * pad_len)
+        data = _tea_pad(data, 8)
         blocks = [struct.unpack(">2I", data[i:i + 8]) for i in range(0, len(data), 8)]
         out = bytearray()
         for v0, v1 in blocks:
@@ -816,12 +868,7 @@ class XTEADecrypt(Operation):
                 _sum = (_sum - delta) & 0xFFFFFFFF
                 v0 = (v0 - (((v1 << 4 ^ v1 >> 5) + v1) ^ (_sum + K[_sum & 3]))) & 0xFFFFFFFF
             out.extend(struct.pack(">2I", v0, v1))
-        result = bytes(out)
-        if result:
-            pad_len = result[-1]
-            if 1 <= pad_len <= 8 and all(b == pad_len for b in result[-pad_len:]):
-                result = result[:-pad_len]
-        return result
+        return _tea_unpad(bytes(out), 8)
 
 
 # ---- XXTEA ----
@@ -845,8 +892,9 @@ class XXTEAEncrypt(Operation):
         key = key_bytes(self.get_arg(args, "Key", ""), self.get_arg(args, "Key format", "Hex"))
         key = key[:16].ljust(16, b"\x00")
         k = list(struct.unpack(">4I", key))
-        pad_len = (4 - (len(data) % 4)) % 4
-        data = data + bytes([pad_len] * pad_len)
+        # Pad 1..8 bytes (PKCS-style): guarantees at least 2 words for XXTEA
+        # and unambiguous padding removal on decrypt.
+        data = _tea_pad(data, 8)
         v = list(struct.unpack(">%dI" % (len(data) // 4), data))
         n = len(v)
         if n < 2:
@@ -898,11 +946,7 @@ class XXTEADecrypt(Operation):
             y = v[0]
             _sum = (_sum - _XXTEA_DELTA) & 0xFFFFFFFF
         result = struct.pack(">%dI" % n, *v)
-        if result:
-            pad_len = result[-1]
-            if 1 <= pad_len <= 4 and all(b == pad_len for b in result[-pad_len:]):
-                result = result[:-pad_len]
-        return result
+        return _tea_unpad(result, 8)
 
 
 class Substitute(Operation):
@@ -1293,7 +1337,7 @@ OPERATIONS = [
     BitShiftLeft, BitShiftRight, RC4, RC4Drop,
     AESEncrypt, AESDecrypt, AESKeyWrap, AESKeyUnwrap,
     DESEncrypt, DESDecrypt, TripleDESEncrypt, TripleDESDecrypt,
-    BlowfishEncrypt, BlowfishDecrypt, RC2Encrypt, RC2Decrypt, ChaCha20Op,
+    BlowfishEncrypt, BlowfishDecrypt, RC2Encrypt, RC2Decrypt, ChaCha20Op, Salsa20Op,
     TEAEncrypt, TEADecrypt, XTEAEncrypt, XTEADecrypt, XXTEAEncrypt, XXTEADecrypt,
     Substitute,
     AffineEncode, AffineDecode, A1Z26Encode, A1Z26Decode,

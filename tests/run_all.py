@@ -8,6 +8,8 @@ import test_ciphers
 import test_arithmetic
 import test_utils
 import test_formula
+import test_fixes
+import test_ui
 from test_runner import report
 
 ok = report()

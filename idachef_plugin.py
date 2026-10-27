@@ -26,7 +26,7 @@ from idachef.core.logger import log
 
 PLUGIN_NAME = "IDAChef"
 PLUGIN_HOTKEY = "Ctrl-Alt-C"
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "1.1.0"
 PLUGIN_AUTHOR = "IDAChef"
 
 

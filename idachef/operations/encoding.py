@@ -450,7 +450,7 @@ class FromHTMLEntity(Operation):
 class EscapeUnicodeChars(Operation):
     name = "Escape Unicode Characters"
     category = CATEGORY
-    description = "Escapes Unicode characters to \\uXXXX notation."
+    description = "Escapes Unicode characters to \\uXXXX notation (code points above 0xFFFF become UTF-16 surrogate pairs)."
 
     def _run(self, data, args):
         text = data.decode("utf-8", errors="replace")
@@ -458,7 +458,13 @@ class EscapeUnicodeChars(Operation):
         for ch in text:
             cp = ord(ch)
             if cp > 127:
-                out.append("\\u%04x" % cp)
+                if cp > 0xFFFF:
+                    cp -= 0x10000
+                    hi = 0xD800 + (cp >> 10)
+                    lo = 0xDC00 + (cp & 0x3FF)
+                    out.append("\\u%04x\\u%04x" % (hi, lo))
+                else:
+                    out.append("\\u%04x" % cp)
             else:
                 out.append(ch)
         return "".join(out).encode()
@@ -623,11 +629,50 @@ class EscapeString(Operation):
 class UnescapeString(Operation):
     name = "Unescape String"
     category = CATEGORY
-    description = "Interprets C-style backslash escapes (\\n, \\t, \\xHH, \\uHHHH, ...) in the input."
+    description = "Interprets C-style backslash escapes (\\n, \\t, \\r, \\\\, \\xHH, \\uHHHH with surrogate pairs, \\0) in the input; other characters pass through unchanged."
+
+    ESCAPES = {
+        "n": "\n", "r": "\r", "t": "\t", "0": "\0", "a": "\a",
+        "b": "\b", "f": "\f", "v": "\v", "\\": "\\", "'": "'", '"': '"',
+    }
 
     def _run(self, data, args):
-        text = data.decode("utf-8", errors="ignore")
-        return text.encode("utf-8").decode("unicode_escape").encode("latin-1", errors="replace")
+        text = data.decode("utf-8", errors="replace")
+        out = []
+        i = 0
+        n = len(text)
+        while i < n:
+            ch = text[i]
+            if ch == "\\" and i + 1 < n:
+                nxt = text[i + 1]
+                if nxt == "x" and i + 3 < n and all(c in "0123456789abcdefABCDEF" for c in text[i + 2:i + 4]):
+                    out.append(chr(int(text[i + 2:i + 4], 16)))
+                    i += 4
+                    continue
+                if nxt == "u":
+                    hex_match = re.match(r"\\u([0-9a-fA-F]{4})", text[i:])
+                    if hex_match:
+                        cp = int(hex_match.group(1), 16)
+                        i += 6
+                        # Combine UTF-16 surrogate pairs
+                        if 0xD800 <= cp < 0xDC00 and text[i:i + 2] == "\\u":
+                            low = re.match(r"\\u([0-9a-fA-F]{4})", text[i:])
+                            if low and 0xDC00 <= int(low.group(1), 16) < 0xE000:
+                                cp = 0x10000 + ((cp - 0xD800) << 10) + (int(low.group(1), 16) - 0xDC00)
+                                i += 6
+                        out.append(chr(cp))
+                        continue
+                if nxt in self.ESCAPES:
+                    out.append(self.ESCAPES[nxt])
+                    i += 2
+                    continue
+                # Unknown escape - keep the character as-is
+                out.append(nxt)
+                i += 2
+                continue
+            out.append(ch)
+            i += 1
+        return "".join(out).encode("utf-8")
 
 
 class ToPunycode(Operation):

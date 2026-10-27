@@ -76,23 +76,26 @@ class PRNGPrime(Operation):
 class DeBruijnSequence(Operation):
     name = "Generate De Bruijn Sequence"
     category = CATEGORY
-    description = "Generates a De Bruijn sequence for the given alphabet size and word length."
+    description = "Generates a De Bruijn sequence for the given alphabet size and subsequence length (every possible subsequence of length n appears exactly once)."
     args = [
         {"name": "Alphabet size (k)", "type": "number", "value": 16},
         {"name": "Subsequence length (n)", "type": "number", "value": 4},
     ]
 
     def _run(self, data, args):
-        k = max(2, int(self.get_arg(args, "Alphabet size (k)", 16)))
+        k = max(2, min(256, int(self.get_arg(args, "Alphabet size (k)", 16))))
         n = max(1, int(self.get_arg(args, "Subsequence length (n)", 4)))
-        alphabet = [i for i in range(k)]
-        a = [0] * k * n
+        if k ** n > 4_000_000:
+            return b"Sequence too large (k^n over 4,000,000) - lower k or n"
+
+        # Standard recursive De Bruijn construction (Fredricksen & Maiorana style)
+        sequence = []
+        a = [0] * (k * n + 1)
 
         def db(t, p):
             if t > n:
                 if n % p == 0:
-                    for j in range(1, p + 1):
-                        a.append(alphabet[a[j]])
+                    sequence.extend(a[1:p + 1])
             else:
                 a[t] = a[t - p]
                 db(t + 1, p)
@@ -100,50 +103,17 @@ class DeBruijnSequence(Operation):
                     a[t] = j
                     db(t + 1, t)
 
-        def _run_db():
-            seq = []
-            a.clear()
-            a.extend([0] * k * n)
+        # Guard against deep recursion for large n by raising the limit
+        import sys
+        old_limit = sys.getrecursionlimit()
+        sys.setrecursionlimit(max(old_limit, n * k + 1000))
+        try:
             db(1, 1)
-            return bytes(seq)
+        finally:
+            sys.setrecursionlimit(old_limit)
 
-        result = _run_db()
-        return result
-
-
-class IndexOfCoincidence(Operation):
-    name = "Index of Coincidence"
-    category = CATEGORY
-    description = "Computes the Index of Coincidence of alphabetic text."
-
-    def _run(self, data, args):
-        text = data.decode("ascii", errors="ignore").upper()
-        chars = [c for c in text if 65 <= ord(c) <= 90]
-        if len(chars) < 2:
-            return b"0.0"
-        freq = {}
-        for c in chars:
-            freq[c] = freq.get(c, 0) + 1
-        n = len(chars)
-        ic = sum(f * (f - 1) for f in freq.values()) / (n * (n - 1))
-        return ("%.6f" % ic).encode()
-
-
-class ChiSquare(Operation):
-    name = "Chi Square"
-    category = CATEGORY
-    description = "Computes the Chi-squared statistic compared to uniform distribution."
-
-    def _run(self, data, args):
-        if not data:
-            return b"0.0"
-        freq = [0] * 256
-        for b in data:
-            freq[b] += 1
-        n = len(data)
-        expected = n / 256
-        chi2 = sum(((f - expected) ** 2) / expected for f in freq)
-        return ("%.4f" % chi2).encode()
+        # Index 0..k-1 map to bytes 0..k-1 (like CyberChef's byte alphabet)
+        return bytes(i for i in sequence if i < 256)
 
 
 class DisassembleX86(Operation):
@@ -234,6 +204,5 @@ class HTMLToText(Operation):
 
 OPERATIONS = [
     PRNG, PRNGPrime, DeBruijnSequence, GenerateDeBruijn,
-    IndexOfCoincidence, ChiSquare,
     DisassembleX86, GenerateLoremIpsum, HaversineDistance, HTMLToText,
 ]

@@ -90,7 +90,7 @@ class ExtractStrings(Operation):
         min_len = int(self.get_arg(args, "Minimum length", 4))
         enc = self.get_arg(args, "Encoding", "ASCII")
         if enc.startswith("Wide"):
-            pattern = re.compile(("[\x20-\x7e]\x00" * min_len).encode())
+            pattern = re.compile(rb"(?:[\x20-\x7e]\x00){%d,}" % min_len)
             matches = pattern.findall(data)
             result = [m.decode("utf-16-le", errors="replace") for m in matches]
         else:

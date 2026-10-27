@@ -452,18 +452,64 @@ class RSAVerify(Operation):
 HAVE_CRYPTO = _try_import("cryptography")
 
 
+def _der_children(data):
+    """Parse top-level DER TLVs in *data*; returns list of (tag, content, tlv_bytes)."""
+    out = []
+    pos = 0
+    n = len(data)
+    while pos + 1 < n:
+        tag = data[pos]
+        start = pos
+        pos += 1
+        length = data[pos]
+        pos += 1
+        if length & 0x80:
+            nbytes = length & 0x7F
+            if pos + nbytes > n:
+                break
+            length = int.from_bytes(data[pos:pos + nbytes], "big")
+            pos += nbytes
+        content = data[pos:pos + length]
+        pos += length
+        out.append((tag, content, data[start:pos]))
+    return out
+
+
+def _extract_spki_from_cert(der):
+    """Walk an X.509 DER certificate and return the SubjectPublicKeyInfo TLV.
+
+    Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signatureValue }
+    tbsCertificate children: [0] version?, serialNumber, signature, issuer,
+    validity, subject, subjectPublicKeyInfo, [1] issuerUID?, [2] subjectUID?,
+    [3] extensions?  -> subjectPublicKeyInfo is element 5 after stripping [0].
+    """
+    children = _der_children(der)
+    if not children or children[0][0] != 0x30:
+        raise ValueError("not a DER certificate structure")
+    fields = _der_children(children[0][1])
+    if fields and fields[0][0] == 0xA0:  # explicit [0] version wrapper
+        fields = fields[1:]
+    if len(fields) < 6 or fields[5][0] != 0x30:
+        raise ValueError("SubjectPublicKeyInfo not found in certificate")
+    return fields[5][2]
+
+
 class PublicKeyFromCertificate(Operation):
     name = "Public Key from Certificate"
     category = CATEGORY
-    description = "Extracts the public key from an X.509 certificate (PEM or DER). Requires pycryptodome."
+    description = "Extracts the RSA public key from an X.509 certificate (PEM or DER). Requires pycryptodome."
 
     def _run(self, data, args):
         if not HAVE_RSA:
             raise ImportError("pycryptodome is required - run: pip install pycryptodome")
         from Crypto.PublicKey import RSA
         der = _pem_to_der(data)
-        key = RSA.import_key(der)
-        return key.public_key().export_key("PEM")
+        try:
+            spki = _extract_spki_from_cert(der)
+        except Exception:
+            # Input may already be a bare key rather than a certificate
+            return RSA.import_key(der).export_key("PEM")
+        return RSA.import_key(spki).export_key("PEM")
 
 
 class PublicKeyFromPrivateKey(Operation):

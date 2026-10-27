@@ -5,7 +5,7 @@ from test_runner import recipe_test
 from idachef.operations.textutils import (
     Reverse, ToUpperCase, ToLowerCase, SwapCase, AlternatingCaps,
     ChangeCase, StripWhitespace, RemoveNullBytes, RemoveANSIEscapes,
-    FindReplace, RegularExpression,
+    FindReplace, RegexSubstitution,
     SortLines, Unique, Split, FilterOp,
     Head, Tail, DropBytes, TakeBytes, PadLines,
     AddLineNumbers,
@@ -39,7 +39,7 @@ recipe_test("Find/Replace: simple", [{"op_cls": FindReplace, "args": ["foo", "ba
 recipe_test("Find/Replace: regex", [{"op_cls": FindReplace, "args": ["\\d+", "N", True, True]}], "abc 123 xyz", "abc N xyz")
 
 # ---- Regular Expression ----
-recipe_test("Regular Expression: digits to X", [{"op_cls": RegularExpression, "args": ["\\d+", "X", True]}], "abc 123 xyz", "abc X xyz")
+recipe_test("Regex Substitution: digits to X", [{"op_cls": RegexSubstitution, "args": ["\\d+", "X", True]}], "abc 123 xyz", "abc X xyz")
 
 # ---- Sort ----
 recipe_test("Sort: alphabetical", [{"op_cls": SortLines, "args": ["Alphabetical (A-Z)", False]}], "c\na\nb", "a\nb\nc")

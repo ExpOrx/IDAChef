@@ -26,14 +26,17 @@ IDA database.  Patch the result back into the binary or drop it as a comment.
 
 ## Features
 
-- **285 operations** across 12 categories — encodings, ciphers, compression,
+- **289 operations** across 12 categories — encodings, ciphers, compression,
   hashing, extraction, networking, code formatting, and more
 - **Dockable IDA widget** (`Ctrl-Alt-C`) — operation browser, recipe builder,
   and I/O panel all in one window
 - **Live "Auto Bake"** — every parameter change instantly recomputes the full
   recipe chain
 - **Direct IDA integration** — pull selected bytes, grab the string under your
-  cursor, patch output back into the binary, or set comments
+  cursor (ASCII or UTF-16LE), patch output back into the binary, or set
+  comments; batch-process a whole address range of strings and patch results back
+- **Recipe import/export** — save recipes as JSON and load them again, including
+  recipes exported from **CyberChef itself**
 - **Formula expressions** — chain byte-level operations in a single step:
   `FromHex+XOR(0x55)+ADD(3)` or `FromBase64+NOT+ROL(3)`
 - **Auto-growing argument fields** — monospace fields that expand to fit your
@@ -102,6 +105,10 @@ IDA database.  Patch the result back into the binary or drop it as a comment.
 
 ### Three-panel layout
 
+All panels are splitter-based and **freely resizable** — drag the dividers
+between columns, between the recipe list and its argument editor, and
+between the Input / Output / Batch sections.
+
 - **Left — Operation Browser**: searchable, categorised tree. Double-click an
   operation to add it to your recipe. Type in the search box to filter by
   name, category, or description.
@@ -109,17 +116,21 @@ IDA database.  Patch the result back into the binary or drop it as a comment.
 - **Centre — Recipe**: ordered list of operations. Click a step to edit its
   arguments. Use **Up** / **Down** / **Remove** / **Clear** buttons to
   rearrange or reset. Arguments update live as you type (with **Auto Bake**
-  enabled).
+  enabled). **Save Recipe** / **Load Recipe** export and import the chain as
+  JSON (also copied to the clipboard); Load Recipe additionally accepts
+  recipes exported from CyberChef, mapping their positional arguments onto
+  IDAChef's schemas.
 
 - **Right — I/O Panel**:
   - **Input**: paste text directly, or pull data from IDA:
     - **Get Selected Bytes** — reads the current Hex View / disassembly
       selection and displays it as a hex string
     - **Get String @ Cursor** — reads the string literal at the current
-      cursor position
+      cursor position (ASCII and UTF-16LE strings are both detected)
     - **From Clipboard** — pastes clipboard content
   - **Output**: displays the final baked result in your chosen format
-    (Auto hex/text, Hex, UTF-8, Latin-1, Base64, Decimal Bytes)
+    (Auto hex/text, Hex, UTF-8, Latin-1, Base64, Decimal Bytes, C Array,
+    Python bytes, UTF-16LE Text)
   - **Actions**:
     - **Copy Output** to clipboard
     - **Output → Input** — feed the result back as new input
@@ -174,7 +185,7 @@ input bytes are used as-is.
 Keys in `XOR`/`ADD`/`SUB`/`AND`/`OR`/`MUL`/`MOD` can be hex (`0xNN`) or
 decimal integers.  Multi-byte hex keys are cyclically repeated.
 
-## Operations by category — 285 total
+## Operations by category — 289 total
 
 ### Data format (50)
 To/From: Hex, Hexdump, Base64, Base32, Base45, Base85, Base58, Base62,
@@ -183,32 +194,37 @@ Morse Code, Quoted-Printable.  Swap Endianness, Escape/Unescape String,
 Escape/Unescape Unicode, Punycode, BCD, Hex Content.  CSV↔JSON,
 Unicode Normalisation, Text↔Integer Conversion, Generate UUID.
 
-### Encryption / Encoding (50)
-XOR, XOR Brute Force (scoring + crib), ROT13/ROT13 Brute Force,
-ROT47/ROT47 Brute Force, ROT8000, ROR13, Atbash, Vigenère Encode/Decode,
-Bit Shift Left/Right.  RC4/RC4 Drop.  AES Encrypt/Decrypt (CBC/ECB/CTR/GCM),
-AES Key Wrap/Unwrap.  DES/3DES Encrypt/Decrypt.  Blowfish Encrypt/Decrypt.
-RC2 Encrypt/Decrypt.  ChaCha20.  TEA/XTEA/XXTEA Encrypt/Decrypt.
+### Encryption / Encoding (51)
+XOR (byte or UTF-16LE word-wise), XOR Brute Force (scoring + crib),
+ROT13/ROT13 Brute Force, ROT47/ROT47 Brute Force, ROT8000,
+ROR13 (byte rotate + classic 32-bit string hash), Atbash,
+Vigenère Encode/Decode, Bit Shift Left/Right.  RC4/RC4 Drop.
+AES Encrypt/Decrypt (CBC/ECB/CTR/GCM), AES Key Wrap/Unwrap.
+DES/3DES Encrypt/Decrypt.  Blowfish Encrypt/Decrypt.
+RC2 Encrypt/Decrypt.  ChaCha20, Salsa20.  TEA/XTEA/XXTEA Encrypt/Decrypt.
 Substitute, Affine/A1Z26/Rail Fence/Bacon/Bifid Cipher Encode/Decode,
 Caesar Box.  PBKDF2/HKDF key derivation.  Bcrypt, Scrypt.
 
 ### Compression (19)
 Gzip/Gunzip, Zlib Deflate/Inflate, Raw Deflate/Inflate, Bzip2 Compress/
 Decompress, LZMA Compress/Decompress.  Tar/Untar, Zip/Unzip.  LZ4 Compress/
-Decompress, LZString Compress/Decompress, LZNT1 Decompress.
+Decompress, LZString Compress/Decompress (compatible with pieroxy's
+lz-string JS library), LZNT1 Decompress (verified against Windows
+ntdll's own decompressor).
 
-### Hashing (33)
-MD2, MD4, MD5, SHA0, SHA1, SHA224, SHA256, SHA384, SHA512, SHA2 (unified),
-SHA3-224/256/384/512, SHA3 (unified), Keccak, RIPEMD160, BLAKE2b, BLAKE2s.
-CRC16 (CCITT/IBM), CRC32, CRC-8/16/32 (unified), Adler32, Fletcher Checksum,
-TCP/IP Checksum, XOR Checksum, Luhn Checksum, Parity Bit.  HMAC, CMAC,
-MurmurHash3, NT Hash, LM Hash.  Entropy, Frequency Distribution,
-Analyse Hash.
+### Hashing (34)
+MD2, MD4, MD5, SHA0 (real SHA-0, FIPS 180), SHA1, SHA224, SHA256, SHA384,
+SHA512, SHA2 (unified), SHA3-224/256/384/512, SHA3 (unified), Keccak,
+RIPEMD160, BLAKE2b, BLAKE2s.
+CRC16 (CCITT/IBM), CRC32, CRC-8/16/32 (unified, incl. Modbus & XMODEM),
+Adler32, Fletcher Checksum, TCP/IP Checksum, XOR Checksum, Luhn Checksum,
+Parity Bit.  HMAC, CMAC, MurmurHash3, NT Hash, LM Hash.  Entropy,
+Frequency Distribution, Analyse Hash.
 
 ### Utils (35)
 Reverse, To Upper/Lower/Swap/Alternating/Change Case.  Remove Whitespace/
 Null Bytes/ANSI Escape Codes/Line Numbers/Diacritics.  Find/Replace (regex),
-Regular Expression, Sort, Shuffle, Unique, Split, Filter.  Head, Tail,
+Regex Substitution, Sort, Shuffle, Unique, Split, Filter.  Head, Tail,
 Drop/Take Bytes, Pad Lines, Add Line Numbers, Count Occurrences.
 Diff, Hamming/Levenshtein Distance.  UNIX Timestamp↔Date, Parse DateTime,
 Get Time.  JWT Decode.  Index of Coincidence, Chi Square.
@@ -218,31 +234,35 @@ Extract: IPv4/IPv6, URLs, Emails, Domains, Hex Strings, MAC addresses,
 Hashes, File Paths, Dates.  Custom Regex (list + count), Strings (ASCII +
 UTF-16LE), RAKE keyword extraction.
 
-### Networking (17)
+### Networking (18)
 Defang/Refang IP & URL.  Format MAC Address (with/without : or -).
-Parse IPv6, IPv6 Expand/Compress.  CIDR to IP Range, IP Range to CIDR.
-IPv4→Decimal, Decimal→IPv4.  Parse URI, URL Decode/Encode.
+Parse IPv6, IPv4/TCP/UDP header parsing, Parse URI.  Dechunk HTTP
+Response, Strip HTTP Headers.  Parse IP Range (CIDR or explicit ranges),
+CIDR to IP Range.  IPv4→Decimal, Decimal→IPv4.  Change IP Format,
+Group IP Addresses.
 
 ### Code tidy (14)
 JSON Beautify/Minify, XML Beautify/Minify, SQL Beautify/Minify,
 CSS Beautify/Minify, JavaScript Beautify/Minify, Strip HTML Tags,
 Generic Code Beautify, PHP Serialize/Deserialize.
 
-### Arithmetic / Logic (24)
+### Arithmetic / Logic (27)
 Sum, Subtract, Multiply, Divide, Mean, Median, Standard Deviation.
 Extended GCD, Modular Inverse.  Set Union/Intersection/Difference/
 Symmetric Difference.  Bitwise AND/OR/NOT, ADD/SUB (mod 256), MOD.
-Bit Shift Left/Right, Rotate Left/Right.  **Formula (compound)** — chain
-byte-level operations with FromHex/FromBase64 prefix support.
+Bit Shift Left/Right, Rotate Left/Right (byte), Rotate Word (8/16/32/64-bit).
+Bytes to Integers / Integers to Bytes (word size, endianness, signedness).
+**Formula (compound)** — chain byte-level operations with
+FromHex/FromBase64 prefix support.
 
 ### Language (7)
 To/From NATO Phonetic Alphabet, Convert Leet Speak, Encode/Decode Text,
 Unicode Text Format, Escape Smart Characters.
 
-### Other (10)
+### Other (8)
 Pseudo-Random Number/Prime Generator, De Bruijn Sequence, Cyclic Pattern
-Generator, Index of Coincidence, Chi Square, Disassemble x86 (capstone),
-Generate Lorem Ipsum, Haversine Distance, HTML to Text.
+Generator, Disassemble x86 (capstone), Generate Lorem Ipsum, Haversine
+Distance, HTML to Text.
 
 ### Public Key (13)
 RSA Encrypt/Decrypt/Sign/Verify, Generate RSA Key Pair, Public Key from
@@ -314,8 +334,11 @@ if any step fails, baking stops and the partial output + error are reported.
 
 ## Testing
 
-157 automated tests covering encoding, hashing, ciphers, arithmetic, utility
-operations, and formula expressions:
+222 automated tests covering encoding, hashing, ciphers, arithmetic, utility
+operations, formula expressions, the fixes/new features in 1.1 (including
+regression fixtures produced by Windows `ntdll` and the reference
+`lz-string` JS implementation), and an offscreen UI layout test for the
+resizable panel structure:
 
 ```bash
 cd /path/to/IDAChef

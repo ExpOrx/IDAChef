@@ -9,4 +9,4 @@ Architecture mirrors CyberChef's own layout (see gchq/CyberChef, src/core/):
     ui/chef_widget.py    -> the dockable IDA widget (recipe list + bake)
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

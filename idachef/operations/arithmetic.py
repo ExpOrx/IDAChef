@@ -393,6 +393,93 @@ class SymmetricDifference(Operation):
         return "\n".join(sorted(set_a ^ set_b)).encode()
 
 
+class BytesToIntegers(Operation):
+    name = "Bytes to Integers"
+    category = CATEGORY
+    description = "Packs the input bytes into integers of the given word size (like CyberChef's To Decimal but for 16/32/64-bit words). Handy for reading dwords/qwords out of a hex view."
+    args = [
+        {"name": "Word size (bytes)", "type": "option", "value": "4", "options": ["1", "2", "4", "8"]},
+        {"name": "Endianness", "type": "option", "value": "Little Endian", "options": ["Little Endian", "Big Endian"]},
+        {"name": "Signed", "type": "boolean", "value": False},
+        {"name": "Output base", "type": "option", "value": "Decimal", "options": ["Decimal", "Hex", "Binary"]},
+    ]
+
+    def _run(self, data, args):
+        word = int(self.get_arg(args, "Word size (bytes)", "4"))
+        big_endian = self.get_arg(args, "Endianness", "Little Endian") == "Big Endian"
+        signed = self.get_arg(args, "Signed", False)
+        base = self.get_arg(args, "Output base", "Decimal")
+        out = []
+        for i in range(0, len(data) - (len(data) % word), word):
+            chunk = data[i:i + word]
+            val = int.from_bytes(chunk, "big" if big_endian else "little", signed=signed)
+            if base == "Hex":
+                out.append("0x%0*x" % (word * 2, val))
+            elif base == "Binary":
+                out.append(format(val, "b"))
+            else:
+                out.append(str(val))
+        return "\n".join(out).encode()
+
+
+class IntegersToBytes(Operation):
+    name = "Integers to Bytes"
+    description = "Converts a list of integers (decimal or 0x-prefixed hex) to packed bytes of the given word size."
+    category = CATEGORY
+    args = [
+        {"name": "Word size (bytes)", "type": "option", "value": "4", "options": ["1", "2", "4", "8"]},
+        {"name": "Endianness", "type": "option", "value": "Little Endian", "options": ["Little Endian", "Big Endian"]},
+        {"name": "Signed", "type": "boolean", "value": False},
+    ]
+
+    def _run(self, data, args):
+        word = int(self.get_arg(args, "Word size (bytes)", "4"))
+        big_endian = self.get_arg(args, "Endianness", "Little Endian") == "Big Endian"
+        signed = self.get_arg(args, "Signed", False)
+        text = text_from_data_ignore(data)
+        tokens = re.findall(r"0[xX][0-9a-fA-F]+|-?\d+", text)
+        out = bytearray()
+        max_val = 1 << (word * 8)
+        for tok in tokens:
+            val = int(tok, 16 if tok.lower().startswith("0x") else 10)
+            if signed and val < 0:
+                val %= max_val
+            val &= max_val - 1
+            out.extend(val.to_bytes(word, "big" if big_endian else "little"))
+        return bytes(out)
+
+
+class RotateWord(Operation):
+    name = "Rotate word"
+    category = CATEGORY
+    description = "Rotates 8/16/32/64-bit words by N bits (unlike 'Rotate left/right', which work per-byte). Useful for computing ROR-style hashes by hand."
+    args = [
+        {"name": "Amount", "type": "number", "value": 13},
+        {"name": "Direction", "type": "option", "value": "Right", "options": ["Right", "Left"]},
+        {"name": "Word size (bits)", "type": "option", "value": "32", "options": ["8", "16", "32", "64"]},
+        {"name": "Endianness", "type": "option", "value": "Little Endian", "options": ["Little Endian", "Big Endian"]},
+    ]
+
+    def _run(self, data, args):
+        amount = int(self.get_arg(args, "Amount", 13))
+        direction = self.get_arg(args, "Direction", "Right")
+        bits = int(self.get_arg(args, "Word size (bits)", "32"))
+        big_endian = self.get_arg(args, "Endianness", "Little Endian") == "Big Endian"
+        word = bits // 8
+        order = "big" if big_endian else "little"
+        mask = (1 << bits) - 1
+        amount %= bits
+        out = bytearray()
+        for i in range(0, len(data) - (len(data) % word), word):
+            val = int.from_bytes(data[i:i + word], order)
+            if direction == "Right":
+                val = ((val >> amount) | (val << (bits - amount))) & mask if amount else val
+            else:
+                val = ((val << amount) | (val >> (bits - amount))) & mask if amount else val
+            out.extend(val.to_bytes(word, order))
+        return bytes(out)
+
+
 class FormulaOperation(Operation):
     """Compound byte-level formula: optional FromHex/FromBase64 prefix to
     decode input, then chain XOR, ADD, SUB, AND, OR, NOT, ROL, ROR, SHL,
@@ -434,5 +521,6 @@ OPERATIONS = [
     ExtendedGCD, ModularInverse,
     BitwiseAND, BitwiseOR, BitwiseNOT, AddMod256, SubMod256, ModOp,
     BitShiftLeft, BitShiftRight, RotateLeft, RotateRight,
+    BytesToIntegers, IntegersToBytes, RotateWord,
     FormulaOperation,
 ]

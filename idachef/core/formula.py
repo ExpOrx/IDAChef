@@ -98,7 +98,7 @@ class FormulaOp(object):
             n = self.arg % 8
             return (b >> n), key_pos
         elif self.kind in ("mod",):
-            if self.arg == 0:
+            if not self.arg or self.arg[0] == 0:
                 return b, key_pos
             return (b % self.arg[0]) & 0xFF, key_pos
 
@@ -200,8 +200,6 @@ def parse_formula(expr):
         if kind in ("rol", "ror", "shl", "shr"):
             # For bit operations, take the first byte value as the bit count
             ops.append(FormulaOp(kind, key_bytes[0] if key_bytes else 0))
-        elif kind == "mod":
-            ops.append(FormulaOp(kind, key_bytes))
         else:
             if not key_bytes:
                 key_bytes = [0]

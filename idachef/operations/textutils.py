@@ -132,10 +132,10 @@ class FindReplace(Operation):
         return re.sub(pattern, replace, text, flags=flags).encode("utf-8")
 
 
-class RegularExpression(Operation):
-    name = "Regular expression"
+class RegexSubstitution(Operation):
+    name = "Regex Substitution"
     category = CATEGORY
-    description = "Applies a regex substitution (like Find/Replace but regex-only)."
+    description = "Applies a regex substitution (like Find/Replace but regex-only). See Extractors for the match-listing 'Regular expression' op."
     args = [
         {"name": "Regex", "type": "string", "value": ""},
         {"name": "Replace", "type": "string", "value": ""},
@@ -454,10 +454,13 @@ class UnixTimestampToDate(Operation):
 
     def _run(self, data, args):
         text = data.decode("utf-8", errors="ignore").strip()
-        ts = float(re.search(r"-?\d+(\.\d+)?", text).group())
+        m = re.search(r"-?\d+(\.\d+)?", text)
+        if not m:
+            return b"Could not parse a UNIX timestamp"
+        ts = float(m.group())
         if self.get_arg(args, "Units", "Seconds") == "Milliseconds":
             ts /= 1000.0
-        dt = datetime.datetime.utcfromtimestamp(ts)
+        dt = datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
         return (dt.strftime("%Y-%m-%d %H:%M:%S UTC")).encode()
 
 
@@ -507,13 +510,15 @@ class ParseDateTime(Operation):
             for f in formats:
                 try:
                     dt = datetime.datetime.strptime(text, f)
-                    ts = dt.timestamp()
+                    # Input has no timezone info - treat it as UTC so the
+                    # resulting timestamp and displays agree.
+                    ts = dt.replace(tzinfo=datetime.timezone.utc).timestamp()
                     break
                 except ValueError:
                     pass
         if ts is None:
             return b"Could not parse date/time"
-        dt = datetime.datetime.utcfromtimestamp(ts)
+        dt = datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
         lines = [
             "ISO 8601:  %s" % dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "UTC:       %s" % dt.strftime("%Y-%m-%d %H:%M:%S UTC"),
@@ -579,7 +584,7 @@ class GetTime(Operation):
     description = "Returns the current UTC time in various formats."
 
     def _run(self, data, args):
-        now = datetime.datetime.utcnow()
+        now = datetime.datetime.now(datetime.timezone.utc)
         lines = [
             "ISO 8601:  %s" % now.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "UTC:       %s" % now.strftime("%Y-%m-%d %H:%M:%S UTC"),
@@ -627,7 +632,7 @@ class ChiSquare(Operation):
 OPERATIONS = [
     Reverse, ToUpperCase, ToLowerCase, SwapCase, AlternatingCaps,
     ChangeCase, StripWhitespace, RemoveNullBytes, RemoveANSIEscapes,
-    FindReplace, RegularExpression,
+    FindReplace, RegexSubstitution,
     SortLines, Shuffle, Unique, Split, FilterOp,
     Head, Tail, DropBytes, TakeBytes, PadLines,
     AddLineNumbers, RemoveLineNumbers,

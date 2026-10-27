@@ -29,12 +29,52 @@ def _make_hash_op(op_name, hashlib_name):
 MD2 = _make_hash_op("MD2", "md2") if "md2" in hashlib.algorithms_available else None
 MD4 = _make_hash_op("MD4", "md4") if "md4" in hashlib.algorithms_available else None
 MD5 = _make_hash_op("MD5", "md5")
-SHA0 = _make_hash_op("SHA0", "sha1")  # SHA0 is broken, SHA1 as closest
-SHA1 = _make_hash_op("SHA1", "sha1")
 SHA224 = _make_hash_op("SHA224", "sha224")
 SHA256 = _make_hash_op("SHA256", "sha256")
 SHA384 = _make_hash_op("SHA384", "sha384")
 SHA512 = _make_hash_op("SHA512", "sha512")
+
+
+def _sha0_digest(data):
+    """Pure-python SHA-0: the original SHA as published in FIPS 180 (1993).
+    Identical to SHA-1 except the message schedule omits the extra left
+    rotation: W[t] = W[t-3] ^ W[t-8] ^ W[t-14] ^ W[t-16]."""
+    h = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0]
+    msg = bytearray(data)
+    msg_len = len(data)
+    msg.append(0x80)
+    msg.extend(b"\x00" * ((55 - msg_len) % 64))
+    msg.extend(struct.pack(">Q", msg_len * 8))
+    for off in range(0, len(msg), 64):
+        w = list(struct.unpack(">16I", bytes(msg[off:off + 64])))
+        for t in range(16, 80):
+            w.append(w[t - 3] ^ w[t - 8] ^ w[t - 14] ^ w[t - 16])
+        a, b, c, d, e = h
+        for t in range(80):
+            if t < 20:
+                f, k = (b & c) | (~b & d), 0x5A827999
+            elif t < 40:
+                f, k = b ^ c ^ d, 0x6ED9EBA1
+            elif t < 60:
+                f, k = (b & c) | (b & d) | (c & d), 0x8F1BBCDC
+            else:
+                f, k = b ^ c ^ d, 0xCA62C1D6
+            tmp = (((a << 5) | (a >> 27)) + f + e + k + w[t]) & 0xFFFFFFFF
+            e, d, c, b, a = d, c, ((b << 30) | (b >> 2)) & 0xFFFFFFFF, a, tmp
+        h = [(x + y) & 0xFFFFFFFF for x, y in zip(h, [a, b, c, d, e])]
+    return "".join("%08x" % x for x in h).encode()
+
+
+class SHA0(Operation):
+    name = "SHA0"
+    category = CATEGORY
+    description = "Computes the original SHA-0 digest (FIPS 180, 1993; withdrawn in favour of SHA-1), output as lowercase hex."
+
+    def _run(self, data, args):
+        return _sha0_digest(data)
+
+
+SHA1 = _make_hash_op("SHA1", "sha1")
 SHA3_224 = _make_hash_op("SHA3-224", "sha3_224") if "sha3_224" in hashlib.algorithms_available else None
 SHA3_256 = _make_hash_op("SHA3-256", "sha3_256") if "sha3_256" in hashlib.algorithms_available else None
 SHA3_384 = _make_hash_op("SHA3-384", "sha3_384") if "sha3_384" in hashlib.algorithms_available else None
@@ -137,9 +177,9 @@ class CRC32(Operation):
 class CRCAll(Operation):
     name = "CRC Checksum"
     category = CATEGORY
-    description = "Computes CRC-8, CRC-16, CRC-32 checksums."
+    description = "Computes CRC-8, CRC-16, CRC-32 checksums with a choice of common variants."
     args = [{"name": "CRC Variant", "type": "option", "value": "CRC-32",
-             "options": ["CRC-8", "CRC-16 (CCITT)", "CRC-16 (IBM)", "CRC-32"]}]
+             "options": ["CRC-32", "CRC-16 (CCITT)", "CRC-16 (IBM)", "CRC-16 (Modbus)", "CRC-16 (XMODEM)", "CRC-8"]}]
 
     def _run(self, data, args):
         variant = self.get_arg(args, "CRC Variant", "CRC-32")
@@ -147,27 +187,38 @@ class CRCAll(Operation):
             return ("%08x" % (zlib.crc32(data) & 0xFFFFFFFF)).encode()
         elif variant == "CRC-16 (CCITT)":
             crc = 0xFFFF
-            poly = 0x1021
             for b in data:
                 crc ^= b << 8
                 for _ in range(8):
-                    crc = ((crc << 1) ^ poly) & 0xFFFF if (crc & 0x8000) else (crc << 1) & 0xFFFF
+                    crc = ((crc << 1) ^ 0x1021) & 0xFFFF if (crc & 0x8000) else (crc << 1) & 0xFFFF
+            return ("%04x" % crc).encode()
+        elif variant == "CRC-16 (XMODEM)":
+            crc = 0x0000
+            for b in data:
+                crc ^= b << 8
+                for _ in range(8):
+                    crc = ((crc << 1) ^ 0x1021) & 0xFFFF if (crc & 0x8000) else (crc << 1) & 0xFFFF
+            return ("%04x" % crc).encode()
+        elif variant == "CRC-16 (Modbus)":
+            crc = 0xFFFF
+            for b in data:
+                crc ^= b
+                for _ in range(8):
+                    crc = (crc >> 1) ^ 0xA001 if (crc & 1) else (crc >> 1)
             return ("%04x" % crc).encode()
         elif variant == "CRC-16 (IBM)":
             crc = 0x0000
-            poly = 0x8005
             for b in data:
                 crc ^= b
                 for _ in range(8):
-                    crc = ((crc >> 1) ^ poly) if (crc & 1) else (crc >> 1)
+                    crc = (crc >> 1) ^ 0x8005 if (crc & 1) else (crc >> 1)
             return ("%04x" % crc).encode()
         else:  # CRC-8
             crc = 0
-            poly = 0x07
             for b in data:
                 crc ^= b
                 for _ in range(8):
-                    crc = ((crc << 1) ^ poly) if (crc & 0x80) else (crc << 1)
+                    crc = ((crc << 1) ^ 0x07) if (crc & 0x80) else (crc << 1)
             return ("%02x" % (crc & 0xFF)).encode()
 
 
@@ -249,16 +300,16 @@ class LuhnChecksum(Operation):
 class ParityBit(Operation):
     name = "Parity Bit"
     category = CATEGORY
-    description = "Computes parity (even/odd) for each byte in the input."
+    description = "Outputs the parity bit (0 or 1) for each input byte: the bit that would make the total number of 1s (byte plus bit) even or odd."
     args = [{"name": "Parity", "type": "option", "value": "Even", "options": ["Even", "Odd"]}]
 
     def _run(self, data, args):
         even = self.get_arg(args, "Parity", "Even") == "Even"
         out = []
         for b in data:
-            ones = b.bit_count()
-            parity = (ones % 2 == 0) == even
-            out.append(str(int(parity)))
+            ones = bin(b).count("1")
+            bit = ones % 2 if even else 1 - (ones % 2)
+            out.append(str(bit))
         return "".join(out).encode()
 
 
@@ -300,6 +351,7 @@ class CMAC(Operation):
     def _run(self, data, args):
         try:
             from Crypto.Hash import CMAC as cmac_mod
+            from Crypto.Cipher import AES
         except ImportError:
             raise ImportError("pycryptodome is required for CMAC")
         key_str = self.get_arg(args, "Key", "")
@@ -311,7 +363,7 @@ class CMAC(Operation):
             key = base64.b64decode(key_str + "=" * (-len(key_str) % 4))
         else:
             key = key_str.encode()
-        c = cmac_mod.new(key, ciphermod=None)  # default AES
+        c = cmac_mod.new(key, ciphermod=AES)
         c.update(data)
         return c.hexdigest().encode()
 
@@ -416,8 +468,8 @@ class LMHash(Operation):
     def _run(self, data, args):
         text = data.decode("utf-8", errors="replace").upper()[:14]
         text = text.ljust(14, "\x00")
-        key1 = _lm_key_bytes(text[:7])
-        key2 = _lm_key_bytes(text[7:])
+        key1 = _lm_key_bytes(text[:7].encode("ascii", errors="replace"))
+        key2 = _lm_key_bytes(text[7:].encode("ascii", errors="replace"))
         magic = b"KGS!@#$%"
         try:
             from Crypto.Cipher import DES
@@ -428,18 +480,27 @@ class LMHash(Operation):
             raise ImportError("pycryptodome is required for LM Hash")
 
 
-def _lm_key_bytes(seven_chars):
+def _lm_key_bytes(seven_bytes):
+    """Expand 7 bytes into an 8-byte DES key with odd parity bits
+    (the standard LAN Manager key schedule, cf. Samba's smb_key())."""
+    b = seven_bytes
+    key = [
+        b[0] >> 1,
+        ((b[0] & 0x01) << 6) | (b[1] >> 2),
+        ((b[1] & 0x03) << 5) | (b[2] >> 3),
+        ((b[2] & 0x07) << 4) | (b[3] >> 4),
+        ((b[3] & 0x0F) << 3) | (b[4] >> 5),
+        ((b[4] & 0x1F) << 2) | (b[5] >> 6),
+        ((b[5] & 0x3F) << 1) | (b[6] >> 7),
+        b[6] & 0x7F,
+    ]
     out = bytearray()
-    for c in seven_chars:
-        out.append(ord(c))
-    result = []
-    for i in range(8):
-        b = 0
-        for j in range(7):
-            if (i < 7) and (out[j] >> (6 - i)) & 1:
-                b |= 1 << (6 - j)
-        result.append(b)
-    return bytes(result)
+    for bits in key:
+        parity = 1
+        for j in range(1, 8):
+            parity ^= (bits >> j) & 1
+        out.append(((bits << 1) | parity) & 0xFF)
+    return bytes(out)
 
 
 class FrequencyDistribution(Operation):
@@ -465,7 +526,7 @@ class FrequencyDistribution(Operation):
 
 OPERATIONS = [
     AnalyseHash, Entropy, FrequencyDistribution,
-    SHA1, SHA2, SHA3, Keccak, RIPEMD160,
+    SHA0, SHA1, SHA2, SHA3, Keccak, RIPEMD160,
     MD5, SHA224, SHA256, SHA384, SHA512,
     CRC16, CRC32, CRCAll, Adler32, FletcherChecksum, TCPIPChecksum, XORChecksum,
     LuhnChecksum, ParityBit,

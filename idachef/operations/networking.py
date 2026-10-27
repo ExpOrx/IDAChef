@@ -212,27 +212,75 @@ class ParseURI(Operation):
         return "\n".join(lines).encode()
 
 
+class DechunkHTTP(Operation):
+    name = "Dechunk HTTP response"
+    category = CATEGORY
+    description = "Decodes an HTTP body with Transfer-Encoding: chunked, removing the per-chunk size markers and joining the chunks."
+    args = [{"name": "Keep trailer", "type": "boolean", "value": False}]
+
+    def _run(self, data, args):
+        out = bytearray()
+        pos = 0
+        while pos < len(data):
+            line_end = data.find(b"\n", pos)
+            if line_end == -1:
+                break
+            size_text = data[pos:line_end].strip().split(b";")[0]  # drop chunk extensions
+            try:
+                size = int(size_text, 16)
+            except ValueError:
+                return b"Dechunk failed: not a chunk size at offset %d: %r" % (pos, size_text)
+            pos = line_end + 1
+            if size == 0:
+                if self.get_arg(args, "Keep trailer", False):
+                    out.extend(data[pos:])
+                break
+            out.extend(data[pos:pos + size])
+            pos += size
+            if data[pos:pos + 2] == b"\r\n":
+                pos += 2
+            elif data[pos:pos + 1] == b"\n":
+                pos += 1
+        return bytes(out)
+
+
 class StripHTTPHeaders(Operation):
     name = "Strip HTTP headers"
     category = CATEGORY
     description = "Removes HTTP headers, leaving only the body (split on double CRLF)."
 
     def _run(self, data, args):
-        idx = data.find(b"\r\n\r\n")
-        if idx == -1:
-            idx = data.find(b"\n\n")
-        if idx >= 0:
-            return data[idx + 2 if idx + 2 < len(data) and data[idx + 2] != 10 else idx + 4:]
+        crlf = data.find(b"\r\n\r\n")
+        if crlf != -1:
+            return data[crlf + 4:]
+        lf = data.find(b"\n\n")
+        if lf != -1:
+            return data[lf + 2:]
         return data
 
 
 class ParseIPRange(Operation):
     name = "Parse IP range"
     category = CATEGORY
-    description = "Expands a CIDR network or IP range into individual addresses."
+    description = "Expands a CIDR network (1.2.3.0/24) or explicit range (1.2.3.4-1.2.3.10) into individual addresses."
 
     def _run(self, data, args):
         text = data.decode("utf-8", errors="ignore").strip()
+        if "-" in text and "/" not in text:
+            # Explicit range like 1.2.3.4-1.2.3.10
+            start_s, _, end_s = text.partition("-")
+            start = ipaddress.ip_address(start_s.strip())
+            end = ipaddress.ip_address(end_s.strip())
+            if start.version != end.version:
+                return b"Mixed IPv4/IPv6 range"
+            networks = ipaddress.summarize_address_range(start, end)
+            total = sum(net.num_addresses for net in networks)
+            if total > 4096:
+                return ("%d addresses in %s (too many to list)" % (total, text)).encode()
+            lines = []
+            for net in networks:
+                lines.extend(str(ip) for ip in net)
+            return "\n".join(lines).encode()
         ip_range = ipaddress.ip_network(text, strict=False)
         if ip_range.num_addresses > 256:
             lines = ["%d addresses in %s (too many to list)" % (ip_range.num_addresses, text)]
@@ -334,6 +382,6 @@ class GroupIPAddresses(Operation):
 OPERATIONS = [
     DefangIP, RefangIP, DefangURL, RefangURL, FormatMACAddress,
     ParseIPv6, ParseIPv4Header, ParseTCP, ParseUDP, ParseURI,
-    StripHTTPHeaders, ParseIPRange, CIDRExpand,
+    DechunkHTTP, StripHTTPHeaders, ParseIPRange, CIDRExpand,
     IPv4ToDecimal, DecimalToIPv4, ChangeIPFormat, GroupIPAddresses,
 ]
